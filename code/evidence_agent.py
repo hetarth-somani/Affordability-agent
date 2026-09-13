@@ -14,7 +14,7 @@ import base64
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from cache import DiskCache
 from llm_client import call_text_json, call_vision_json

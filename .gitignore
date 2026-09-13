@@ -50,3 +50,10 @@ buy-or-wait-project/
 buy-or-wait/
 buy-or-wait-affordability-agent/
 comparison_analysis.md
+implementation_plan.md
+code/compare_outputs.py
+code/debug_request.py
+code/score_sample.py
+code/eval_harness.py
+
+
