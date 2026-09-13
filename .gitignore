@@ -1,0 +1,46 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Environment variables & secrets (CRITICAL: never commit API keys)
+.env
+*.env
+.env.*
+code/.env
+
+# Local caches
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Submission chat transcripts & logs (uploaded separately at submission time)
+log.txt
+log_*.txt
+*.log
+
+# Packaging and archives
+code.zip
+*.zip
+*.tar.gz
+
+# Operating System & IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Scratch and temporary directories
+tmp/
+scratch/
