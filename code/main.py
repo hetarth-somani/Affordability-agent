@@ -130,10 +130,12 @@ def main() -> None:
             }
         )
 
-    with OUTPUT_PATH.open("w", newline="", encoding="utf-8") as f:
+    temp_output = OUTPUT_PATH.with_suffix(".tmp")
+    with temp_output.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=OUTPUT_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
+    temp_output.replace(OUTPUT_PATH)
 
     logger.info("Wrote %d rows to %s", len(rows), OUTPUT_PATH)
     if validation_failures:

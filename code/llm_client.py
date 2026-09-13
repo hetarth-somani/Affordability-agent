@@ -11,9 +11,14 @@ import re
 import time
 from typing import Any, Dict, Optional
 
+from pathlib import Path
 from dotenv import load_dotenv
 from groq import Groq
 
+# Load .env from code/ directory or repo root
+_THIS_DIR = Path(__file__).resolve().parent
+load_dotenv(_THIS_DIR / ".env")
+load_dotenv(_THIS_DIR.parent / ".env")
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -50,7 +55,11 @@ USAGE = UsageTracker()
 
 
 def _client() -> Groq:
-    return Groq(api_key=os.environ["GROQ_API_KEY"])
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        load_dotenv(_THIS_DIR / ".env")
+        api_key = os.environ.get("GROQ_API_KEY")
+    return Groq(api_key=api_key)
 
 
 def _extract_json(text: str) -> Any:

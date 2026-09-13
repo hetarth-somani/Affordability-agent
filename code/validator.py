@@ -77,11 +77,15 @@ def _validate_payment_plan(
         report.violations.append(f"payment_plan has malformed entries: {result.payment_plan!r}")
         return
 
-    if result.recommended_payment_method in ("wait", "not_recommended"):
+    if result.recommended_payment_method == "not_recommended":
         if entries:
-            report.violations.append(
-                f"payment_plan must be 'none' for method {result.recommended_payment_method}"
-            )
+            report.violations.append("payment_plan must be 'none' for method 'not_recommended'")
+        return
+
+    if result.recommended_payment_method == "wait":
+        # wait plans may have exactly one entry: earliest_date:requested_amount
+        if len(entries) > 1:
+            report.violations.append("wait payment_plan may have at most one entry")
         return
 
     if not entries:

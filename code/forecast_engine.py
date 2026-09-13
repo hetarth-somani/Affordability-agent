@@ -73,7 +73,7 @@ def build_balance_timeline(
         e for e in events
         if horizon_start <= _effective_date(e) <= horizon_end
     ]
-    in_window.sort(key=_effective_date)
+    in_window.sort(key=lambda e: (_effective_date(e), 0 if e.direction == "credit" else 1))
 
     dates: List[date] = []
     cumulative_balances: List[float] = []

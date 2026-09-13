@@ -41,6 +41,12 @@ Thumbs.db
 *.swp
 *.swo
 
-# Scratch and temporary directories
+# Scratch, temporary and comparison directories
 tmp/
 scratch/
+*.tmp
+sample_output.csv
+buy-or-wait-project/
+buy-or-wait/
+buy-or-wait-affordability-agent/
+comparison_analysis.md

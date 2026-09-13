@@ -26,12 +26,13 @@ from __future__ import annotations
 import calendar
 import copy
 import logging
+import re
 import statistics
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Dict, List, Optional, Tuple
 
-from evidence_agent import MessageFact
+from evidence_agent import MessageFact, extract_user_message_signals
 from models import DataBundle, FinancialEvent
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ NON_RECURRING_EVENT_TYPES = {
     "investment_sale",
     "investment_valuation",
 }
+NONREGULAR_INCOME_RE = re.compile(
+    r"bonus|commission|arrears|freelance|contract|invoice|platform|app earnings|marketplace|assignment|seasonal|final employer|previous employer|before leave",
+    re.I,
+)
 
 
 def _effective_date(event: FinancialEvent) -> date:
@@ -217,6 +222,8 @@ def detect_recurring_patterns(events: List[FinancialEvent]) -> Dict[Tuple[str, s
             continue
         if event.event_type in NON_RECURRING_EVENT_TYPES:
             continue
+        if event.direction == "credit" and NONREGULAR_INCOME_RE.search(event.description):
+            continue
         groups.setdefault((event.category, event.direction), []).append(event)
 
     patterns: Dict[Tuple[str, str], RecurrencePattern] = {}
@@ -294,6 +301,15 @@ def project_recurring_events(
     counter = 0
 
     for key, pattern in patterns.items():
+        # Staleness guard: skip patterns whose most recent occurrence is more
+        # than 3 full periods before the horizon start.  If a recurring expense
+        # or income stream has been silent for that long, assume it has ended
+        # rather than project phantom future occurrences that would distort the
+        # balance forecast.
+        staleness_threshold = horizon_start - timedelta(days=3 * pattern.frequency_days)
+        if pattern.last_known_date < staleness_threshold:
+            continue
+
         real_events = sorted(real_future_events.get(key, []), key=_effective_date)
         consumed_ids: set[str] = set()
 
@@ -386,16 +402,100 @@ def build_forecastable_events(
     # Deduplicate cancelled/settled pairs
     deduped = deduplicate_events(list(events_by_id.values()))
 
+    # Extract user-level message signals (employment end, rent increases, confirmed salary, invoices)
+    signals = extract_user_message_signals(data.messages_by_user.get(user_id, []), horizon_start)
+
     # Filter to cash-flow-relevant events only
-    usable_for_cash_flow = [
-        e for e in deduped
-        if e.status not in ("cancelled", "failed")
-        and not (e.status == "pending" and e.direction == "credit")
-        and e.direction != "non_cash"
-    ]
+    usable_for_cash_flow = []
+    for e in deduped:
+        if e.status in ("cancelled", "failed") or e.direction == "non_cash":
+            continue
+        if e.status == "pending" and e.direction == "credit":
+            continue
+        # Nonregular credits (bonus, commission, etc.) that have not settled must not be counted
+        if e.direction == "credit" and e.status == "scheduled" and NONREGULAR_INCOME_RE.search(e.description):
+            continue
+        # If employment/contract ended, do not count future unconfirmed salary
+        if signals.salary_ended and e.direction == "credit" and _effective_date(e) >= horizon_start:
+            continue
+        usable_for_cash_flow.append(e)
+
+    # Add confirmed invoices from messages
+    for inv_date, inv_amt, inv_curr, msg_id in signals.confirmed_invoices:
+        if horizon_start <= inv_date <= horizon_end:
+            usable_for_cash_flow.append(
+                FinancialEvent(
+                    event_id=f"invoice_{user_id}_{msg_id}",
+                    user_id=user_id,
+                    event_type="income",
+                    description="Confirmed invoice",
+                    category="income",
+                    direction="credit",
+                    amount=inv_amt,
+                    currency=inv_curr,
+                    event_date=inv_date,
+                    settlement_date=inv_date,
+                    status="scheduled",
+                    linked_event_id=None,
+                    flexibility="fixed",
+                    minimum_allowed_amount=None,
+                    amount_source="message_confirmation",
+                    is_projected=False,
+                )
+            )
 
     # Detect and project recurring patterns
     patterns = detect_recurring_patterns(deduped)
+
+    # Apply message signals to recurring patterns
+    if signals.salary_ended:
+        # If employment ended, drop salary projections
+        patterns = {k: v for k, v in patterns.items() if not (k[0] in ("salary", "income") and k[1] == "credit")}
+
+    if signals.rent_factor > 1.0 and ("rent", "debit") in patterns:
+        rent_pat = patterns[("rent", "debit")]
+        patterns[("rent", "debit")] = RecurrencePattern(
+            category=rent_pat.category,
+            direction=rent_pat.direction,
+            frequency_days=rent_pat.frequency_days,
+            projected_amount=round(rent_pat.projected_amount * signals.rent_factor, 2),
+            last_known_date=rent_pat.last_known_date,
+            occurrence_count=rent_pat.occurrence_count,
+            anchor_day_of_month=rent_pat.anchor_day_of_month,
+            flexibility=rent_pat.flexibility,
+            minimum_allowed_amount=rent_pat.minimum_allowed_amount,
+        )
+
+    if signals.confirmed_salary:
+        amt, curr = signals.confirmed_salary
+        target_day = signals.salary_date.day if signals.salary_date else (
+            patterns[("salary", "credit")].anchor_day_of_month if ("salary", "credit") in patterns and patterns[("salary", "credit")].anchor_day_of_month else 15
+        )
+        last_date = signals.salary_date - timedelta(days=30) if signals.salary_date else horizon_start - timedelta(days=30)
+        patterns[("salary", "credit")] = RecurrencePattern(
+            category="salary",
+            direction="credit",
+            frequency_days=30,
+            projected_amount=amt,
+            last_known_date=last_date,
+            occurrence_count=3,
+            anchor_day_of_month=target_day,
+            flexibility="fixed",
+            minimum_allowed_amount=None,
+        )
+    elif signals.salary_date and ("salary", "credit") in patterns:
+        sal_pat = patterns[("salary", "credit")]
+        patterns[("salary", "credit")] = RecurrencePattern(
+            category=sal_pat.category,
+            direction=sal_pat.direction,
+            frequency_days=sal_pat.frequency_days,
+            projected_amount=sal_pat.projected_amount,
+            last_known_date=signals.salary_date - timedelta(days=30),
+            occurrence_count=sal_pat.occurrence_count,
+            anchor_day_of_month=signals.salary_date.day,
+            flexibility=sal_pat.flexibility,
+            minimum_allowed_amount=sal_pat.minimum_allowed_amount,
+        )
 
     real_future_events_by_key: Dict[Tuple[str, str], List[FinancialEvent]] = {}
     for e in usable_for_cash_flow:

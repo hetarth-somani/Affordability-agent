@@ -22,6 +22,7 @@ before the safety check.
 from __future__ import annotations
 
 import copy
+from itertools import combinations, product
 import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -353,6 +354,43 @@ def _apply_spending_change(
     return new_amount
 
 
+def _change_options_for_reference(
+    reference: FlexibleReference, profile: UserProfile
+) -> List[Tuple[str, float]]:
+    stoppable_cats = set(profile.expense_categories_user_is_willing_to_stop)
+    reducible_cats = set(profile.expense_categories_user_is_willing_to_reduce)
+
+    can_stop = reference.flexibility in ("stoppable", "reducible_or_stoppable") and reference.category in stoppable_cats
+    can_reduce = reference.flexibility in ("reducible", "reducible_or_stoppable") and reference.category in reducible_cats
+
+    options = []
+    if can_stop:
+        options.append(("stop", 0.0))
+    if can_reduce:
+        min_amt = reference.minimum_allowed_amount or 0.0
+        if min_amt < reference.reference_amount:
+            options.append(("reduce", min_amt))
+    return options
+
+
+def _change_combinations(
+    references: Dict[Tuple[str, str], FlexibleReference], profile: UserProfile
+) -> List[List[Tuple[FlexibleReference, str, float]]]:
+    ref_list = list(references.values())
+    all_combos = []
+    for count in range(1, min(3, len(ref_list)) + 1):
+        for selected in combinations(ref_list, count):
+            item_choices = []
+            for ref in selected:
+                opts = _change_options_for_reference(ref, profile)
+                if opts:
+                    item_choices.append([(ref, action, amt) for action, amt in opts])
+            if len(item_choices) == count:
+                for combo in product(*item_choices):
+                    all_combos.append(list(combo))
+    return all_combos
+
+
 def _try_with_spending_changes(
     request: FinancialRequest,
     profile: UserProfile,
@@ -362,61 +400,54 @@ def _try_with_spending_changes(
     horizon_end: date,
     max_changes: int = 3,
 ) -> Tuple[Optional[CandidatePlan], List[str]]:
-    """Iteratively applies spending changes (largest recoverable first) until
-    a viable plan is found or max_changes is exhausted.
+    """Evaluates valid combinations of up to 3 flexible spending changes,
+    finding the optimal plan per official ranking rules.
     """
     references = _flexible_reference_map(base_events, profile, request.request_date, horizon_end)
-    ranked_keys = sorted(
-        references.keys(),
-        key=lambda k: _recoverable_amount(references[k], profile)[1],
-        reverse=True,
-    )
+    combos = _change_combinations(references, profile)
 
-    working_events = {e.event_id: copy.deepcopy(e) for e in base_events}
-    applied_changes: List[str] = []
+    valid_plans: List[Tuple[CandidatePlan, List[str]]] = []
 
-    for key in ranked_keys:
-        if len(applied_changes) >= max_changes:
-            break
-        reference = references[key]
-        action, recoverable = _recoverable_amount(reference, profile)
-        if recoverable <= 0:
-            continue
+    for combo in combos:
+        working_events = {e.event_id: copy.deepcopy(e) for e in base_events}
+        applied_changes: List[str] = []
 
-        new_amount = _apply_spending_change(working_events, reference, action)
-        applied_changes.append(
-            f"stop:{reference.reference_event_id}" if action == "stop"
-            else f"reduce_to:{reference.reference_event_id}:{_format_amount(new_amount)}"
-        )
+        for ref, action, new_amount in combo:
+            _apply_spending_change(working_events, ref, action)
+            applied_changes.append(
+                f"stop:{ref.reference_event_id}" if action == "stop"
+                else f"reduce_to:{ref.reference_event_id}:{_format_amount(new_amount)}"
+            )
 
         timeline = build_balance_timeline(
             list(working_events.values()), profile.current_available_balance,
             profile.home_currency, fx, request.request_date, horizon_end,
         )
 
-        # Try each plan type in the preference hierarchy
         full_candidate = _build_full_payment_candidate(request, profile, timeline)
-        if full_candidate is not None:
+        if full_candidate is not None and full_candidate.completes_by_deadline:
             full_candidate.requires_spending_changes = True
             full_candidate.spending_changes = list(applied_changes)
-            return full_candidate, applied_changes
+            valid_plans.append((full_candidate, applied_changes))
 
         partial_candidate = _build_partial_payment_candidate(request, profile, timeline, horizon_end)
-        if partial_candidate is not None:
+        if partial_candidate is not None and partial_candidate.completes_by_deadline:
             partial_candidate.requires_spending_changes = True
             partial_candidate.spending_changes = list(applied_changes)
-            return partial_candidate, applied_changes
+            valid_plans.append((partial_candidate, applied_changes))
 
-        installment_candidates = _build_installment_candidates(
-            request, profile, timeline, payment_options, horizon_end
-        )
-        if installment_candidates:
-            best = min(installment_candidates, key=lambda c: c.sort_key)
-            best.requires_spending_changes = True
-            best.spending_changes = list(applied_changes)
-            return best, applied_changes
+        for inst in _build_installment_candidates(request, profile, timeline, payment_options, horizon_end):
+            if inst.completes_by_deadline:
+                inst.requires_spending_changes = True
+                inst.spending_changes = list(applied_changes)
+                valid_plans.append((inst, applied_changes))
 
-    return None, applied_changes
+    if not valid_plans:
+        return None, []
+
+    # Sort plans using sort_key and prefer fewer changes
+    best_plan, best_changes = min(valid_plans, key=lambda pair: (pair[0].sort_key, len(pair[1])))
+    return best_plan, best_changes
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -483,11 +514,12 @@ def select_plan(
             status = "affordable_with_plan"
 
         elif "full_payment" in profile.payment_methods_user_will_consider and earliest_full is not None:
-            # Full payment becomes safe later within the horizon
+            # Full payment becomes safe later within the horizon — show the user
+            # when they can come back and pay the full amount.
             winner = CandidatePlan(
                 method="wait",
-                payments=[],
-                completes_by_deadline=False,
+                payments=[(earliest_full, request.requested_amount)],
+                completes_by_deadline=earliest_full <= request.desired_completion_date,
                 requires_spending_changes=False,
             )
             status = "affordable_later"
@@ -502,13 +534,31 @@ def select_plan(
             )
             status = "not_affordable"
 
+    # Determine earliest_date_for_full_payment based on status and method
+    if status == "affordable_now":
+        result_earliest = request.request_date
+    elif status == "not_affordable":
+        # Per spec: empty when no full payment is safe within the forecast period
+        result_earliest = None
+    elif winner.method == "installments" and winner.payments:
+        # For installments, this is the date the last installment completes
+        # (when the full requested amount has finished being paid)
+        last_installment_date = winner.payments[-1][0]
+        # Also surface when a single full payment would first become safe,
+        # but use whichever is earlier
+        result_earliest = (
+            earliest_full
+            if earliest_full is not None and earliest_full <= last_installment_date
+            else last_installment_date
+        )
+    else:
+        result_earliest = earliest_full
+
     return PlanResult(
         amount_safe_to_pay=round(amount_safe_to_pay, 2),
         affordability_status=status,
         recommended_payment_method=winner.method,
         payment_plan=_format_plan(winner.payments),
-        earliest_date_for_full_payment=(
-            request.request_date if status == "affordable_now" else earliest_full
-        ),
+        earliest_date_for_full_payment=result_earliest,
         spending_changes_needed=_format_spending_changes(winner.spending_changes),
     )

@@ -6,18 +6,18 @@ Figures below cover the final full-dataset run that produced `output.csv`. All m
 
 | Provider | Model | Calls | Input tokens | Output tokens | Total tokens | Est. cost (USD) |
 |---|---|---|---|---|---|---|
-| Groq | openai/gpt-oss-120b | 101 | 43,680 | 45,888 | 89,568 | $0.0341 |
+| Groq | openai/gpt-oss-120b | 90 | 39,259 | 43,094 | 82,353 | $0.0317 |
 
 ## Overall totals
 
 - Requests processed: **250**
-- Model calls: **101**
-- Input tokens: **43,680**
-- Output tokens: **45,888**
-- Total tokens: **89,568**
-- Average tokens per request: **358.3**
-- Estimated total cost: **$0.0341**
-- Estimated cost per request: **$0.000136**
+- Model calls: **90**
+- Input tokens: **39,259**
+- Output tokens: **43,094**
+- Total tokens: **82,353**
+- Average tokens per request: **329.4**
+- Estimated total cost: **$0.0317**
+- Estimated cost per request: **$0.000127**
 
 ## Notes on efficiency
 
